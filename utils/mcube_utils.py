@@ -25,10 +25,15 @@ def marching_cubes_with_contraction(
     inv_contraction=None,
     max_range=32.0,
 ):
-    assert resolution % 512 == 0
+
+    # cropN = 512
+    # points_per_batch = 256**3
+    cropN = 512
+    points_per_batch = 512**3
+
+    assert resolution % cropN == 0
 
     resN = resolution
-    cropN = 512
     level = 0
     N = resN // cropN
 
@@ -57,7 +62,7 @@ def marching_cubes_with_contraction(
                 @torch.no_grad()
                 def evaluate(points):
                     z = []
-                    for _, pnts in enumerate(torch.split(points, 256**3, dim=0)):
+                    for _, pnts in enumerate(torch.split(points, points_per_batch, dim=0)):
                         z.append(sdf(pnts))
                     z = torch.cat(z, axis=0)
                     return z

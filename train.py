@@ -143,6 +143,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
+        if iteration % 500 == 0:
+            memory_usage = torch.cuda.memory_reserved(0)/1E9
+            print("torch.cuda.memory_reserved: ", memory_usage, "(GB)")
+
         with torch.no_grad():        
             if network_gui.conn == None:
                 network_gui.try_connect(dataset.render_items)

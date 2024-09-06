@@ -15,9 +15,11 @@ import os
 import math
 from tqdm import tqdm
 from utils.render_utils import save_img_f32, save_img_u8
+from utils.point_utils import depths_to_points
 from functools import partial
 import open3d as o3d
 import trimesh
+import cv2
 
 def post_process_mesh(mesh, cluster_to_keep=1000):
     """
@@ -51,6 +53,7 @@ def to_cam_open3d(viewpoint_stack):
             [W / 2, 0, 0, (W-1) / 2],
             [0, H / 2, 0, (H-1) / 2],
             [0, 0, 0, 1]]).float().cuda().T
+        
         intrins =  (viewpoint_cam.projection_matrix @ ndc2pix)[:3,:3].T
         intrinsic=o3d.camera.PinholeCameraIntrinsic(
             width=viewpoint_cam.image_width,
@@ -137,7 +140,8 @@ class GaussianExtractor(object):
         print(f"Use at least {2.0 * self.radius:.2f} for depth_trunc")
 
     @torch.no_grad()
-    def extract_mesh_bounded(self, voxel_size=0.004, sdf_trunc=0.02, depth_trunc=3, mask_backgrond=True):
+    def extract_mesh_bounded(self, voxel_size=0.004, sdf_trunc=0.02, depth_trunc=3, 
+                             mask_background=True, bbmin=None, bbmax=None):
         """
         Perform TSDF fusion given a fixed depth range, used in the paper.
         
@@ -164,8 +168,17 @@ class GaussianExtractor(object):
             depth = self.depthmaps[i]
             
             # if we have mask provided, use it
-            if mask_backgrond and (self.viewpoint_stack[i].gt_alpha_mask is not None):
+            if mask_background and (self.viewpoint_stack[i].gt_alpha_mask is not None):
                 depth[(self.viewpoint_stack[i].gt_alpha_mask < 0.5)] = 0
+
+            if bbmin is not None and bbmax is not None:
+                points = depths_to_points(self.viewpoint_stack[i], depth.cuda())
+                x, y, z = points[:,0], points[:,1], points[:,2]
+                inside_bb =  (x > bbmin[0]) & (x < bbmax[0]) & \
+                             (y > bbmin[1]) & (y < bbmax[1]) & \
+                             (z > bbmin[2]) & (z < bbmax[2])
+                inside_bb = inside_bb.reshape(depth.shape)
+                depth[~inside_bb] = 0
 
             # make open3d rgbd
             rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
@@ -181,7 +194,7 @@ class GaussianExtractor(object):
         return mesh
 
     @torch.no_grad()
-    def extract_mesh_unbounded(self, resolution=1024):
+    def extract_mesh_unbounded(self, resolution=1024, bbmin=None, bbmax=None):
         """
         Experimental features, extracting meshes from unbounded scenes, not fully test across datasets. 
         return o3d.mesh
@@ -252,19 +265,30 @@ class GaussianExtractor(object):
         inv_contraction = lambda x: unnormalize(uncontract(x))
 
         N = resolution
-        voxel_size = (self.radius * 2 / N)
-        print(f"Computing sdf gird resolution {N} x {N} x {N}")
+        if bbmin is None or bbmax is None:
+            R = contract(normalize(self.gaussians.get_xyz)).norm(dim=-1).cpu().numpy()
+            R = np.quantile(R, q=0.95)
+            R = min(R+0.01, 1.9)
+            bbmin = (-R, -R, -R)
+            bbmax = (R, R, R)
+            voxel_size = (self.radius * 2 / N)
+        else:
+            voxel_size = np.max(np.array(bbmax) - np.array(bbmin)) / N
+            bbmin = contract(normalize(torch.from_numpy(np.array(bbmin)).cuda())).cpu().numpy()
+            bbmax = contract(normalize(torch.from_numpy(np.array(bbmax)).cuda())).cpu().numpy()
+
+
+        print(f"Computing sdf grid resolution {N} x {N} x {N}")
         print(f"Define the voxel_size as {voxel_size}")
+
         sdf_function = lambda x: compute_unbounded_tsdf(x, inv_contraction, voxel_size)
         from utils.mcube_utils import marching_cubes_with_contraction
-        R = contract(normalize(self.gaussians.get_xyz)).norm(dim=-1).cpu().numpy()
-        R = np.quantile(R, q=0.95)
-        R = min(R+0.01, 1.9)
+
 
         mesh = marching_cubes_with_contraction(
             sdf=sdf_function,
-            bounding_box_min=(-R, -R, -R),
-            bounding_box_max=(R, R, R),
+            bounding_box_min=bbmin,
+            bounding_box_max=bbmax,
             level=0,
             resolution=N,
             inv_contraction=inv_contraction,

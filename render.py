@@ -24,6 +24,7 @@ from utils.mesh_utils import GaussianExtractor, to_cam_open3d, post_process_mesh
 from utils.render_utils import generate_path, create_videos
 
 import open3d as o3d
+import numpy as np
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -42,9 +43,10 @@ if __name__ == "__main__":
     parser.add_argument("--num_cluster", default=50, type=int, help='Mesh: number of connected clusters to export')
     parser.add_argument("--unbounded", action="store_true", help='Mesh: using unbounded mode for meshing')
     parser.add_argument("--mesh_res", default=1024, type=int, help='Mesh: resolution for unbounded mesh extraction')
+    parser.add_argument("--mesh_bbmin", default=[], nargs=3, type=float, help='Mesh: min bounding box corner for unbounded mesh extraction')
+    parser.add_argument("--mesh_bbmax", default=[], nargs=3, type=float, help='Mesh: max bounding box corner for unbounded mesh extraction')
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
-
 
     dataset, iteration, pipe = model.extract(args), args.iteration, pipeline.extract(args)
     gaussians = GaussianModel(dataset.sh_degree)
@@ -86,20 +88,35 @@ if __name__ == "__main__":
     if not args.skip_mesh:
         print("export mesh ...")
         os.makedirs(train_dir, exist_ok=True)
+
+        bbmin=None if len(args.mesh_bbmin)==0 else args.mesh_bbmin
+        bbmax=None if len(args.mesh_bbmax)==0 else args.mesh_bbmax
+
         # set the active_sh to 0 to export only diffuse texture
         gaussExtractor.gaussians.active_sh_degree = 0
         gaussExtractor.reconstruction(scene.getTrainCameras())
         # extract the mesh and save
         if args.unbounded:
             name = 'fuse_unbounded.ply'
-            mesh = gaussExtractor.extract_mesh_unbounded(resolution=args.mesh_res)
+            mesh = gaussExtractor.extract_mesh_unbounded(resolution=args.mesh_res, 
+                                                         bbmin=bbmin, 
+                                                         bbmax=bbmax)
         else:
             name = 'fuse.ply'
             depth_trunc = (gaussExtractor.radius * 2.0) if args.depth_trunc < 0  else args.depth_trunc
-            voxel_size = (depth_trunc / args.mesh_res) if args.voxel_size < 0 else args.voxel_size
-            sdf_trunc = 5.0 * voxel_size if args.sdf_trunc < 0 else args.sdf_trunc
-            mesh = gaussExtractor.extract_mesh_bounded(voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc)
-        
+            if bbmin is not None and bbmax is not None:
+                extent = np.max(np.array(bbmax) - np.array(bbmin))
+                voxel_size = (extent / args.mesh_res) if args.voxel_size < 0 else args.voxel_size
+                sdf_trunc = 5.0 * voxel_size if args.sdf_trunc < 0 else args.sdf_trunc
+            else:
+                voxel_size = (depth_trunc / args.mesh_res) if args.voxel_size < 0 else args.voxel_size
+                sdf_trunc = 5.0 * voxel_size if args.sdf_trunc < 0 else args.sdf_trunc
+
+            mesh = gaussExtractor.extract_mesh_bounded(voxel_size=voxel_size, sdf_trunc=sdf_trunc, 
+                            depth_trunc=depth_trunc,
+                            bbmin=bbmin, 
+                            bbmax=bbmax)
+
         o3d.io.write_triangle_mesh(os.path.join(train_dir, name), mesh)
         print("mesh saved at {}".format(os.path.join(train_dir, name)))
         # post-process the mesh and save, saving the largest N clusters
